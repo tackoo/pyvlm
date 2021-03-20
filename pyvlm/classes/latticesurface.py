@@ -15,6 +15,7 @@ class LatticeSurface(object):
     pnls = None
     area = None
     sgrp = None
+    print ("Surface w/ stall")
     def __init__(self, name: str, sects: list, mirror: bool, funcs: list):
         self.name = name
         self.sects = sects
