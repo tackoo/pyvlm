@@ -15,6 +15,10 @@ class LatticeSurface(object):
     pnls = None
     area = None
     sgrp = None
+    kirch_stall = False
+    a1 = None
+    s1 = None
+    s2 = None
     print ("Surface w/ stall")
     def __init__(self, name: str, sects: list, mirror: bool, funcs: list):
         self.name = name
@@ -285,8 +289,18 @@ def latticesurface_from_json(surfdata: dict, display: bool=False):
         sect.offset_twist(twist)
         sect.ruled = ruled
     surf = LatticeSurface(name, sects, mirror, funcs)
+    # Read in Kirchhoff Stall Data
+    if 'kirch_stall' in surfdata:
+        surf.kirch_stall = surfdata['kirch_stall']
+    if 'a1' in surfdata:
+        surf.a1 = surfdata['a1']
+    if 's1' in surfdata:
+        surf.s1 = surfdata['s1']
+    if 's2' in surfdata:
+        surf.s2 = surfdata['s2']
     if 'cnum' in surfdata:
         cnum = surfdata['cnum']
+        surf.cnum = cnum
         cspc = 'cosine'
         if 'cspc' in surfdata:
             cspc = surfdata['cspc'].lower()

@@ -5,6 +5,7 @@ from pygeom.matrix3d import zero_matrix_vector, MatrixVector
 from pygeom.matrix3d import elementwise_dot_product, elementwise_cross_product
 from pygeom.matrix3d import elementwise_multiply, elementwise_divide
 from py2md.classes import MDTable
+import math
 
 seterr(divide='ignore', invalid='ignore')
 
@@ -121,15 +122,24 @@ class LatticeSystem(object):
             veli, vela, velb = velocity_matrix(self.ra, self.rb, self.rc, beta)
             self._avc[mach] = (veli+vela-velb)/fourPi
         return self._avc[mach]
+
+    def update_aic (self, mach, sep_pnt): #Update aic according to Santos, Marques (2018)
+        for cnt,surf in enumerate(self.srfcs):
+            if surf.kirch_stall == True:
+                num_panels = surf.pnls.shape[0] * surf.pnls.shape[1]
+                aic = self.aic(mach)
+                for i in range(cnt*num_panels, (cnt+1)*num_panels):
+                    for j in range(cnt*num_panels, (cnt+1)*num_panels):
+                        aic[i,j] = aic[i,j] * 4 / ((1+math.sqrt(sep_pnt[i]))**2)
+                self._aic[mach] = aic
+    
     def aic(self, mach: float):
-        if self._aic is None:
-            self._aic = {}
-        if mach not in self._aic:
-            avc = self.avc(mach)
-            aic = zeros(avc.shape, dtype=float)
-            for pnl in self.pnls:
-                aic[pnl.lpid, :] = avc[pnl.lpid, :]*pnl.nrml
-            self._aic[mach] = aic
+        self._aic = {}
+        avc = self.avc(mach)
+        aic = zeros(avc.shape, dtype=float)
+        for pnl in self.pnls:
+            aic[pnl.lpid, :] = avc[pnl.lpid, :]*pnl.nrml
+        self._aic[mach] = aic
         return self._aic[mach]
     @property
     def afs(self):
@@ -158,12 +168,13 @@ class LatticeSystem(object):
                             self._afs[lpid, ctup[3]] = rrel**dndln
         return self._afs
     def ungam(self, mach: float):
-        if self._ungam is None:
-            self._ungam = {}
-        if mach not in self._ungam:
-            from pygeom.matrix3d import solve_matrix_vector
+        self._ungam = {}
+        from pygeom.matrix3d import solve_matrix_vector
+        try:
+            aic = self._aic[mach]
+        except:
             aic = self.aic(mach)
-            self._ungam[mach] = -solve_matrix_vector(aic, self.afs)
+        self._ungam[mach] = -solve_matrix_vector(aic, self.afs)
         return self._ungam[mach]
     def avg(self, mach: float):
         if self._avg is None:

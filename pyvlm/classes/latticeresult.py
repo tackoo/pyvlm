@@ -1,12 +1,15 @@
+from os import sep
 from pygeom.geom3d import Vector, Coordinate, Vector, jhat, ihat
 from pygeom.matrix3d import zero_matrix_vector, elementwise_multiply
 from pygeom.matrix3d import elementwise_cross_product, elementwise_dot_product
-from numpy.matlib import zeros, matrix
+from numpy.matlib import zeros, matrix, ones
 from numpy import multiply
 from math import radians, cos, sin, tan
 from matplotlib.pyplot import figure
 from .latticesystem import LatticeSystem
 from py2md.classes import MDTable, MDReport, MDHeading
+import math
+import numpy as np
 
 class LatticeResult(object):
     name = None
@@ -61,6 +64,9 @@ class LatticeResult(object):
         self.pbo2V = 0.0
         self.qco2V = 0.0
         self.rbo2V = 0.0
+        self.a1 = 0.0
+        self.s1 = 0.0
+        self.s2 = 0.0
         self.ctrls = {}
         for control in self.sys.ctrls:
             self.ctrls[control] = 0.0
@@ -98,6 +104,52 @@ class LatticeResult(object):
     def set_cg(self, rcg: Vector):
         self.rcg = rcg
         self.reset()
+    def calc_eff_aoa (self, surf):
+        #Method by Grayson's book.
+        # num_panels = surf.pnls.shape[0]*surf.pnls.shape[1]
+        # eff_aoa = np.zeros(num_panels)
+        # gamma = self.ungam[:, 0]*self.vfs
+        # gamma += self.ungam[:, 1]*self.ofs
+        # for i in range(num_panels):
+        #     for j in range(num_panels):
+        #         aic = self.sys.aic(self.mach)
+        #         eff_aoa[i] += aic[i,j] * (gamma[j,0] / self.speed) #TODO: fix indexing to work more generally with more surfaces
+
+        #Method from Stanford lecture notes
+        # num_panels = surf.pnls.shape[0]*surf.pnls.shape[1]
+        # eff_aoa = np.zeros(num_panels)
+        # gamma = self.ungam[:, 0]*self.vfs
+        # gamma += self.ungam[:, 1]*self.ofs
+        # for i in range(num_panels):
+        #     strip = i // surf.cnum
+        #     y0 = surf.strps[strip].bpos
+        #     Uz = gamma[i,0] / (2*math.pi*y0)
+        #     alpha_i = Uz / self.speed #We don't need arctan due to small angles
+        #     alpha_i = math.degrees(alpha_i)
+        #     # if i == 10:
+        #     #     print (alpha_i)
+        #     eff_aoa[i] = self.alpha - alpha_i
+
+        #Directly get from trres.trwash
+        num_panels = surf.pnls.shape[0]*surf.pnls.shape[1]
+        eff_aoa = np.zeros(num_panels)
+        for i in range(num_panels):
+            strp_id = i // surf.cnum
+            strp = self.sys.strps[strp_id]
+            alpha_i = -self.trres.trwsh[strp.lsid, 0]/self.speed
+            eff_aoa[i] = self.alpha - alpha_i
+        return eff_aoa
+
+    def calc_sep_pnt (self, surf):
+        num_panels = surf.pnls.shape[0]*surf.pnls.shape[1]
+        sep_pnt = np.zeros(num_panels)
+        eff_aoa = self.calc_eff_aoa(surf)
+        for i in range(num_panels):
+            if abs(eff_aoa[i]) <= surf.a1:
+                sep_pnt[i] = 1 - 0.3*math.exp((abs(eff_aoa[i])-surf.a1)/surf.s1)
+            else:
+                sep_pnt[i] = 0.04 + 0.66*math.exp((surf.a1-abs(eff_aoa[i]))/surf.s2)
+        return sep_pnt
     @property
     def acs(self):
         if self._acs is None:
@@ -130,27 +182,40 @@ class LatticeResult(object):
         return self._wcs
     @property
     def ungam(self):
-        if self._ungam is None:
-            self._ungam = self.sys.ungam(self.mach)
+        self._ungam = self.sys.ungam(self.mach)
         return self._ungam
     @property
     def gamma(self):
         if self._gamma is None:
-            self._gamma = self.ungam[:, 0]*self.vfs
-            self._gamma += self.ungam[:, 1]*self.ofs
-            for control in self.ctrls:
-                if control in self.sys.ctrls:
-                    ctrl = self.ctrls[control]
-                    ctrlrad = radians(ctrl)
-                    index = self.sys.ctrls[control]
-                    if ctrl >= 0.0:
-                        indv = index[0]
-                        indo = index[1]
-                    else:
-                        indv = index[2]
-                        indo = index[3]
-                    self._gamma += ctrlrad*(self.ungam[:, indv]*self.vfs)
-                    self._gamma += ctrlrad*(self.ungam[:, indo]*self.ofs)
+            for surf in self.sys.srfcs:
+                if surf.kirch_stall:
+                    self._gamma = self.ungam[:, 0]*self.vfs #Store temp. values for trres.trwsh calculation
+                    self._gamma += self.ungam[:, 1]*self.ofs
+                    sep_pnts = np.ones(surf.pnls.shape[0]*surf.pnls.shape[1]) #Start with f=1 for all panels
+                    new_sep_pnts = self.calc_sep_pnt(surf) #Calculate new sep. pnts. which includes calculating updated circulations first and effective aoas second.
+                    while max(abs(new_sep_pnts - sep_pnts)) >= 1E-6:
+                        self.sys.update_aic(self.mach, new_sep_pnts)
+                        self._gamma = self.ungam[:, 0]*self.vfs #Store temp. values for trres.trwsh calculation
+                        self._gamma += self.ungam[:, 1]*self.ofs
+                        sep_pnts = new_sep_pnts
+                        new_sep_pnts = self.calc_sep_pnt(surf)
+                        # print ("Max abs difference")
+                        # print (max(abs(new_sep_pnts - sep_pnts)))
+                self._gamma = self.ungam[:, 0]*self.vfs
+                self._gamma += self.ungam[:, 1]*self.ofs
+                for control in self.ctrls: #Not sure about this.
+                    if control in self.sys.ctrls:
+                        ctrl = self.ctrls[control]
+                        ctrlrad = radians(ctrl)
+                        index = self.sys.ctrls[control]
+                        if ctrl >= 0.0:
+                            indv = index[0]
+                            indo = index[1]
+                        else:
+                            indv = index[2]
+                            indo = index[3]
+                        self._gamma += ctrlrad*(self.ungam[:, indv]*self.vfs)
+                        self._gamma += ctrlrad*(self.ungam[:, indo]*self.ofs)
         return self._gamma
     def gctrlp_single(self, control: str):
         indv = self.sys.ctrls[control][0]
@@ -172,12 +237,11 @@ class LatticeResult(object):
         return gmats
     @property
     def phi(self):
-        if self._phi is None:
-            num = len(self.sys.strps)
-            self._phi = zeros((num, 1))
-            for strp in self.sys.strps:
-                for pnl in strp.pnls:
-                    self._phi[strp.lsid, 0] += self.gamma[pnl.lpid, 0]
+        num = len(self.sys.strps)
+        self._phi = zeros((num, 1))
+        for strp in self.sys.strps:
+            for pnl in strp.pnls:
+                self._phi[strp.lsid, 0] += self.gamma[pnl.lpid, 0]
         return self._phi
     @property
     def vfs(self):
@@ -272,8 +336,7 @@ class LatticeResult(object):
         return self._nfres
     @property
     def trres(self):
-        if self._trres is None:
-            self._trres = PhiResult(self, self.phi)
+        self._trres = PhiResult(self, self.phi)
         return self._trres
     @property
     def pdres(self):
@@ -881,6 +944,19 @@ class LatticeResult(object):
             table.add_column('Cmo', cfrm, data=[self.pdres.Cm])
             table.add_column('Cno', cfrm, data=[self.pdres.Cn])
             outstr += table._repr_markdown_()
+        if self.phi is not None:
+            table = MDTable()
+            table.add_column('CDi_ff', dfrm, data=[self.trres.CDi])
+            table.add_column('CY_ff', cfrm, data=[self.trres.CY])
+            table.add_column('CL_ff', cfrm, data=[self.trres.CL])
+            # table.add_column('Cl_ff', cfrm, data=[self.trres.Cl])
+            # table.add_column('Cm_ff', cfrm, data=[self.trres.Cm])
+            # table.add_column('Cn_ff', cfrm, data=[self.trres.Cn])
+            table.add_column('e', efrm, data=[self.trres.e])
+            if self.sys.cdo != 0.0:
+                lod_ff = self.trres.CL/(self.pdres.CDo+self.trres.CDi)
+                table.add_column('L/D_ff', '.5g', data=[lod_ff])
+            outstr += table._repr_markdown_()
         if self.gamma is not None:
             table = MDTable()
             table.add_column('Cx', cfrm, data=[self.nfres.Cx])
@@ -898,19 +974,6 @@ class LatticeResult(object):
             if self.sys.cdo != 0.0:
                 lod = self.nfres.CL/(self.pdres.CDo+self.nfres.CDi)
                 table.add_column('L/D', '.5g', data=[lod])
-            outstr += table._repr_markdown_()
-        if self.phi is not None:
-            table = MDTable()
-            table.add_column('CDi_ff', dfrm, data=[self.trres.CDi])
-            table.add_column('CY_ff', cfrm, data=[self.trres.CY])
-            table.add_column('CL_ff', cfrm, data=[self.trres.CL])
-            # table.add_column('Cl_ff', cfrm, data=[self.trres.Cl])
-            # table.add_column('Cm_ff', cfrm, data=[self.trres.Cm])
-            # table.add_column('Cn_ff', cfrm, data=[self.trres.Cn])
-            table.add_column('e', efrm, data=[self.trres.e])
-            if self.sys.cdo != 0.0:
-                lod_ff = self.trres.CL/(self.pdres.CDo+self.trres.CDi)
-                table.add_column('L/D_ff', '.5g', data=[lod_ff])
             outstr += table._repr_markdown_()
         return outstr
     def __repr__(self):
@@ -1171,8 +1234,7 @@ class PhiResult(object):
         self.phi = phi
     @property
     def trwsh(self):
-        if self._trwsh is None:
-            self._trwsh = self.res.sys.bvg*self.phi
+        self._trwsh = self.res.sys.bvg*self.phi
         return self._trwsh
     @property
     def trfrc(self):
